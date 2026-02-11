@@ -57,14 +57,15 @@ function draw(){
 
   // Center grid on screen
   // Approx grid bbox for centering (cheap)
-  const a = axialToPixel(W-1, 0);
-  const b = axialToPixel(0, H-1);
-  const gridW = a.x + hexSize*2;
-  const gridH = b.y + hexSize*2;
-  ctx.translate((canvas.width-gridW)/2 + hexSize, (canvas.height-gridH)/2 + hexSize);
+  // Compute grid bounding box for centering (accounts for stagger)
+    const w = Math.sqrt(3) * hexSize;
+    const gridW = w * (W + 0.5);                 // +0.5 because odd rows shift
+    const gridH = (3/2) * hexSize * (H - 1) + 2*hexSize;
 
-  ctx.lineWidth = 2 * devicePixelRatio;
-  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+    ctx.translate(
+    (canvas.width - gridW)/2 + hexSize,
+    (canvas.height - gridH)/2 + hexSize
+    );
 
   for(let r=0;r<H;r++){
     for(let q=0;q<W;q++){
