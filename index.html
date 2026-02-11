@@ -1,0 +1,77 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
+  <title>Hex Proto</title>
+  <style>
+    html, body { margin:0; height:100%; background:#0b0b0c; overflow:hidden; }
+    canvas { display:block; width:100vw; height:100vh; touch-action:none; }
+  </style>
+</head>
+<body>
+<canvas id="c"></canvas>
+<script>
+const W = 10, H = 8;               // 10 x 8 hexes
+const canvas = document.getElementById("c");
+const ctx = canvas.getContext("2d");
+
+function resize(){
+  canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+  canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
+}
+window.addEventListener("resize", resize);
+resize();
+
+// Pointy-top axial -> pixel (Red Blob Games convention)
+const hexSize = 28 * devicePixelRatio; // tweak
+function axialToPixel(q, r){
+  const x = hexSize * (Math.sqrt(3) * q + Math.sqrt(3)/2 * r);
+  const y = hexSize * (3/2 * r);
+  return {x, y};
+}
+function hexCorner(cx, cy, i){
+  const angle = (Math.PI / 180) * (60 * i - 30);
+  return { x: cx + hexSize * Math.cos(angle), y: cy + hexSize * Math.sin(angle) };
+}
+function drawHex(cx, cy){
+  ctx.beginPath();
+  const p0 = hexCorner(cx, cy, 0);
+  ctx.moveTo(p0.x, p0.y);
+  for(let i=1;i<6;i++){
+    const p = hexCorner(cx, cy, i);
+    ctx.lineTo(p.x, p.y);
+  }
+  ctx.closePath();
+  ctx.stroke();
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.save();
+
+  // Center grid on screen
+  // Approx grid bbox for centering (cheap)
+  const a = axialToPixel(W-1, 0);
+  const b = axialToPixel(0, H-1);
+  const gridW = a.x + hexSize*2;
+  const gridH = b.y + hexSize*2;
+  ctx.translate((canvas.width-gridW)/2 + hexSize, (canvas.height-gridH)/2 + hexSize);
+
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.strokeStyle = "rgba(255,255,255,0.18)";
+
+  for(let r=0;r<H;r++){
+    for(let q=0;q<W;q++){
+      const {x,y} = axialToPixel(q, r);
+      drawHex(x, y);
+    }
+  }
+
+  ctx.restore();
+  requestAnimationFrame(draw);
+}
+draw();
+</script>
+</body>
+</html>
