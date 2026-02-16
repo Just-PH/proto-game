@@ -445,4 +445,191 @@ function drawUnit(u, isDragging=false, worldX=null, worldY=null){
     ctx.strokeStyle = "rgba(255,255,255,0.65)";
     ctx.lineWidth = 3 * devicePixelRatio;
     ctx.stroke();
-  } else
+  } else if(u.tauntT > 0 && u.team === "E"){
+    ctx.beginPath();
+    ctx.arc(cx, cy, radius*1.08, 0, Math.PI*2);
+    ctx.strokeStyle = "rgba(231,76,60,0.70)";
+    ctx.lineWidth = 3 * devicePixelRatio;
+    ctx.stroke();
+  }
+
+  // HP bar
+  const barW = radius * 2.0;
+  const barH = 6 * devicePixelRatio;
+  const x0 = cx - barW/2;
+  const y0 = cy + radius + 8 * devicePixelRatio;
+
+  ctx.fillStyle = "rgba(0,0,0,0.45)";
+  ctx.fillRect(x0, y0, barW, barH);
+
+  const t = Math.max(0, Math.min(1, u.hp / u.maxHp));
+  ctx.fillStyle = "rgba(255,255,255,0.75)";
+  ctx.fillRect(x0, y0, barW * t, barH);
+}
+
+function draw(){
+  ctx.clearRect(0,0,canvas.width,canvas.height);
+  ctx.fillStyle = "#0b0b0c";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // grid
+  const {ox, oy} = computeOrigin();
+  ctx.save();
+  ctx.translate(ox, oy);
+
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.strokeStyle = "rgba(255,255,255,0.16)";
+
+  for(let r=0; r<GRID_H; r++){
+    for(let q=0; q<GRID_W; q++){
+      const {x,y} = hexToPixel(q, r);
+      drawHexOutline(x, y);
+    }
+  }
+
+  // hover highlight (only when not running)
+  if(!running && hoverHex){
+    const {x,y} = hexToPixel(hoverHex.q, hoverHex.r);
+    ctx.beginPath();
+    const p0 = hexCorner(x, y, 0);
+    ctx.moveTo(p0.x, p0.y);
+    for(let i=1;i<6;i++){
+      const p = hexCorner(x, y, i);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fill();
+  }
+
+  ctx.restore();
+
+  // units
+  for(const u of units){
+    if(!u.alive) continue;
+    // dragging handled separately
+    if(dragging && dragging.unit.id === u.id) continue;
+    drawUnit(u);
+  }
+  if(dragging){
+    drawUnit(dragging.unit, true, pointerWorld.x, pointerWorld.y);
+  }
+
+  // ticking
+  const now = performance.now();
+  const dt = (now - lastTs) / 1000;
+  lastTs = now;
+
+  if(running){
+    acc += dt;
+    while(acc >= TICK){
+      aiTick();
+      acc -= TICK;
+    }
+  }
+
+  requestAnimationFrame(draw);
+}
+
+// ----- Drag & drop (only before Start) -----
+let dragging = null;
+let pointerWorld = {x:0,y:0};
+
+function getPointerWorld(e){
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * devicePixelRatio;
+  const y = (e.clientY - rect.top) * devicePixelRatio;
+  return { x, y };
+}
+function unitHitTest(worldX, worldY){
+  const radius = HEX_SIZE * 0.55;
+  for(let i=units.length-1; i>=0; i--){
+    const u = units[i];
+    if(!u.alive) continue;
+    // allow dragging only player units
+    if(u.team !== "P") continue;
+
+    const cLocal = hexToPixel(u.q, u.r);
+    const cWorld = localToWorld(cLocal.x, cLocal.y);
+    const dx = worldX - cWorld.x;
+    const dy = worldY - cWorld.y;
+    if(dx*dx + dy*dy <= radius*radius) return u;
+  }
+  return null;
+}
+
+canvas.addEventListener("pointerdown", (e)=>{
+  canvas.setPointerCapture(e.pointerId);
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+
+  const local = worldToLocal(p.x, p.y);
+  hoverHex = pixelToHex(local.x, local.y);
+
+  if(running) return;
+
+  const u = unitHitTest(p.x, p.y);
+  if(!u) return;
+  dragging = { unit: u, start_q: u.q, start_r: u.r, pointerId: e.pointerId };
+});
+canvas.addEventListener("pointermove", (e)=>{
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+  const local = worldToLocal(p.x, p.y);
+  hoverHex = pixelToHex(local.x, local.y);
+});
+canvas.addEventListener("pointerup", (e)=>{
+  if(!dragging || dragging.pointerId !== e.pointerId) return;
+
+  if(running){
+    dragging = null;
+    return;
+  }
+
+  const p = getPointerWorld(e);
+  const local = worldToLocal(p.x, p.y);
+  const h = pixelToHex(local.x, local.y);
+
+  if(h){
+    const occ = unitAt(h.q, h.r);
+    if(!occ){
+      dragging.unit.q = h.q;
+      dragging.unit.r = h.r;
+    } else {
+      dragging.unit.q = dragging.start_q;
+      dragging.unit.r = dragging.start_r;
+    }
+  } else {
+    dragging.unit.q = dragging.start_q;
+    dragging.unit.r = dragging.start_r;
+  }
+  dragging = null;
+});
+canvas.addEventListener("pointercancel", (e)=>{
+  if(!dragging || dragging.pointerId !== e.pointerId) return;
+  dragging.unit.q = dragging.start_q;
+  dragging.unit.r = dragging.start_r;
+  dragging = null;
+});
+
+// ----- Buttons -----
+document.getElementById("btnStart").addEventListener("click", ()=>{
+  if(running) return;
+  // reset timers/cds for a clean start
+  for(const u of units){
+    u.tauntedBy = null; u.tauntT = 0; u.stunnedT = 0;
+    u.atkCd = 0; u.skillCd = 0;
+    u.alive = (u.hp > 0);
+  }
+  running = true;
+  acc = 0;
+  lastTs = performance.now();
+});
+document.getElementById("btnReset").addEventListener("click", ()=>{
+  resetGame();
+});
+
+draw();
+</script>
+</body>
+</html>
