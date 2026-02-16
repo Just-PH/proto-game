@@ -31,31 +31,45 @@
 <canvas id="c"></canvas>
 
 <script>
-/**
- * Cheap combat prototype (tick-based) on a 10x8 pointy-top odd-r hex grid.
- * - Drag & drop placement before fight.
- * - Start button runs AI: move toward nearest enemy until in range.
- * - 4 player units with simple abilities + gray melee enemies.
- */
-
 const GRID_W = 10, GRID_H = 8;
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 
-function resize(){
-  canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
-  canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
-}
-window.addEventListener("resize", resize);
-resize();
-
-// ----- Hex geometry (pointy-top, odd-r offset like TFT) -----
-let HEX_SIZE = 28 * devicePixelRatio;
+let HEX_SIZE = 24; // auto-fit after resize
 
 function hexWidth() { return Math.sqrt(3) * HEX_SIZE; }
 function hexHeight(){ return 2 * HEX_SIZE; }
 function hexVStep(){ return 1.5 * HEX_SIZE; }
 
+function autoFitHexSize(){
+  // Fit the grid into canvas with some padding.
+  // Grid width approx: hexWidth * (W + 0.5) + hexWidth (margin-ish)
+  // Grid height approx: hexVStep*(H-1) + hexHeight + hexHeight (margin-ish)
+  const pad = 20 * devicePixelRatio;
+
+  // Solve for size from width constraint
+  // width ≈ sqrt(3)*S*(W+0.5) + 2S   (rough padding for corners)
+  // => S ≈ (availW) / (sqrt(3)*(W+0.5) + 2)
+  const denomW = (Math.sqrt(3) * (GRID_W + 0.5) + 2);
+  const sFromW = (canvas.width - 2*pad) / denomW;
+
+  // height ≈ 1.5S*(H-1) + 2S + 2S  (corners + margin)
+  // => S ≈ (availH) / (1.5*(H-1) + 4)
+  const denomH = (1.5 * (GRID_H - 1) + 4);
+  const sFromH = (canvas.height - 2*pad) / denomH;
+
+  HEX_SIZE = Math.max(10 * devicePixelRatio, Math.floor(Math.min(sFromW, sFromH)));
+}
+
+function resize(){
+  canvas.width = Math.floor(window.innerWidth * devicePixelRatio);
+  canvas.height = Math.floor(window.innerHeight * devicePixelRatio);
+  autoFitHexSize();
+}
+window.addEventListener("resize", resize);
+resize();
+
+// ----- Hex (pointy-top, odd-r offset) -----
 function hexToPixel(q, r){
   const x = hexWidth() * (q + 0.5 * (r & 1));
   const y = hexVStep() * r;
@@ -78,8 +92,7 @@ function drawHexOutline(cx, cy){
 }
 
 function gridBoundsPx(){
-  const w = hexWidth();
-  const width = w * (GRID_W + 0.5);
+  const width = hexWidth() * (GRID_W + 0.5);
   const height = hexVStep() * (GRID_H - 1) + hexHeight();
   return { width, height };
 }
@@ -98,7 +111,7 @@ function localToWorld(x, y){
   return { x: x + ox, y: y + oy };
 }
 
-// pixel -> hex: pick closest center among nearby candidates
+// pixel -> hex: nearest center among nearby candidates
 function pixelToHex(localX, localY){
   const rApprox = localY / hexVStep();
   const r0 = Math.round(rApprox);
@@ -122,13 +135,16 @@ function pixelToHex(localX, localY){
   return best ? { q: best.q, r: best.r } : null;
 }
 
-// ----- Hex axial distance (using offset->axial conversion) -----
-// We'll keep board coords as odd-r offset (q,r) but compute distance via axial coords.
+// ----- Distance via axial conversion -----
 function offsetToAxial(q, r){
-  // odd-r to axial
   const aq = q - ((r - (r & 1)) / 2);
   const ar = r;
   return { aq, ar };
+}
+function axialToOffset(aq, ar){
+  const r = ar;
+  const q = aq + ((r - (r & 1)) / 2);
+  return { q, r };
 }
 function hexDist(q1,r1,q2,r2){
   const a = offsetToAxial(q1,r1);
@@ -140,17 +156,11 @@ function hexDist(q1,r1,q2,r2){
 const DIRS_AXIAL = [
   {dq:+1, dr:0}, {dq:-1, dr:0}, {dq:0, dr:+1}, {dq:0, dr:-1}, {dq:+1, dr:-1}, {dq:-1, dr:+1}
 ];
-function axialToOffset(aq, ar){
-  const r = ar;
-  const q = aq + ((r - (r & 1)) / 2);
-  return { q, r };
-}
 function neighbors(q, r){
   const a = offsetToAxial(q,r);
   const out = [];
   for(const d of DIRS_AXIAL){
-    const na = { aq: a.aq + d.dq, ar: a.ar + d.dr };
-    const no = axialToOffset(na.aq, na.ar);
+    const no = axialToOffset(a.aq + d.dq, a.ar + d.dr);
     if(no.q>=0 && no.q<GRID_W && no.r>=0 && no.r<GRID_H) out.push(no);
   }
   return out;
@@ -166,27 +176,15 @@ const COLORS = {
 };
 
 function makeUnit({id, team, q, r, color, role}){
-  const base = {
-    id, team, q, r, color, role,
-    hp: 100, maxHp: 100,
-    alive: true,
-    // status timers (seconds)
-    tauntedBy: null,   // unit id
-    tauntT: 0,
-    stunnedT: 0,
-    // cooldowns (seconds)
-    atkCd: 0,
-    skillCd: 0,
+  const u = { id, team, q, r, color, role, hp:100, maxHp:100, alive:true,
+    tauntedBy:null, tauntT:0, stunnedT:0, atkCd:0, skillCd:0
   };
-
-  // Role tuning
-  if(role === "warrior"){ base.maxHp=160; base.hp=160; base.atk=18; base.range=1; base.atkCdBase=0.9; base.skillCdBase=6.0; }
-  if(role === "archer") { base.maxHp=95;  base.hp=95;  base.atk=16; base.range=3; base.atkCdBase=1.0; base.skillCdBase=5.0; }
-  if(role === "mage")   { base.maxHp=90;  base.hp=90;  base.atk=14; base.range=3; base.atkCdBase=1.1; base.skillCdBase=6.0; }
-  if(role === "diver")  { base.maxHp=120; base.hp=120; base.atk=17; base.range=1; base.atkCdBase=1.0; base.skillCdBase=5.5; }
-  if(role === "grunt")  { base.maxHp=100; base.hp=100; base.atk=12; base.range=1; base.atkCdBase=1.1; base.skillCdBase=999; }
-
-  return base;
+  if(role==="warrior"){ u.maxHp=u.hp=160; u.atk=18; u.range=1; u.atkCdBase=0.9; u.skillCdBase=6.0; }
+  if(role==="archer") { u.maxHp=u.hp=95;  u.atk=16; u.range=3; u.atkCdBase=1.0; u.skillCdBase=5.0; }
+  if(role==="mage")   { u.maxHp=u.hp=90;  u.atk=14; u.range=3; u.atkCdBase=1.1; u.skillCdBase=6.0; }
+  if(role==="diver")  { u.maxHp=u.hp=120; u.atk=17; u.range=1; u.atkCdBase=1.0; u.skillCdBase=5.5; }
+  if(role==="grunt")  { u.maxHp=u.hp=100; u.atk=12; u.range=1; u.atkCdBase=1.1; u.skillCdBase=999; }
+  return u;
 }
 
 let units = [];
@@ -201,7 +199,6 @@ function resetGame(){
     makeUnit({id:3, team:"P", q:1, r:4, color:COLORS.blue, role:"mage"}),
     makeUnit({id:4, team:"P", q:2, r:5, color:COLORS.yellow, role:"diver"}),
 
-    // gray enemies (basic melee)
     makeUnit({id:101, team:"E", q:8, r:2, color:COLORS.gray, role:"grunt"}),
     makeUnit({id:102, team:"E", q:8, r:3, color:COLORS.gray, role:"grunt"}),
     makeUnit({id:103, team:"E", q:8, r:4, color:COLORS.gray, role:"grunt"}),
@@ -211,148 +208,107 @@ function resetGame(){
 }
 resetGame();
 
-function unitAt(q, r){
-  return units.find(u => u.alive && u.q===q && u.r===r) || null;
-}
-function living(team){
-  return units.filter(u => u.alive && u.team===team);
-}
-function enemyTeam(team){ return team === "P" ? "E" : "P"; }
+function unitAt(q, r){ return units.find(u => u.alive && u.q===q && u.r===r) || null; }
+function living(team){ return units.filter(u => u.alive && u.team===team); }
+function enemyTeam(team){ return team==="P" ? "E" : "P"; }
 
 function nearestEnemy(u){
   const enemies = living(enemyTeam(u.team));
   if(enemies.length===0) return null;
-
-  // If taunted, force target to taunter if still alive
   if(u.tauntT > 0 && u.tauntedBy !== null){
-    const taunter = units.find(x => x.id===u.tauntedBy && x.alive);
-    if(taunter) return taunter;
+    const t = units.find(x => x.id===u.tauntedBy && x.alive);
+    if(t) return t;
   }
-
-  let best = null;
+  let best=null;
   for(const e of enemies){
     const d = hexDist(u.q,u.r,e.q,e.r);
-    if(!best || d < best.d) best = { e, d };
+    if(!best || d<best.d) best={e,d};
   }
-  return best ? best.e : null;
+  return best.e;
 }
 
-// Pick next step greedily (no obstacles), avoid occupied tiles
 function stepToward(u, target){
   const nbs = neighbors(u.q,u.r).filter(h => !unitAt(h.q,h.r));
-  if(nbs.length===0) return null;
-
-  let best = null;
+  let best=null;
   for(const h of nbs){
     const d = hexDist(h.q,h.r,target.q,target.r);
-    if(!best || d < best.d) best = { h, d };
+    if(!best || d<best.d) best={h,d};
   }
   return best ? best.h : null;
 }
-
-// Step away (for archer escape): choose neighbor that maximizes distance to closest enemy, avoid occupied
 function stepAway(u){
   const enemies = living(enemyTeam(u.team));
   const nbs = neighbors(u.q,u.r).filter(h => !unitAt(h.q,h.r));
-  if(nbs.length===0) return null;
-
-  let best = null;
+  let best=null;
   for(const h of nbs){
-    let minD = Infinity;
+    let minD=Infinity;
     for(const e of enemies){
       const d = hexDist(h.q,h.r,e.q,e.r);
-      if(d < minD) minD = d;
+      if(d<minD) minD=d;
     }
-    if(!best || minD > best.minD) best = { h, minD };
+    if(!best || minD>best.minD) best={h,minD};
   }
   return best ? best.h : null;
 }
 
 function applyDamage(src, tgt, amount){
-  if(!tgt.alive) return;
   tgt.hp -= amount;
   if(tgt.hp <= 0){
-    tgt.hp = 0;
-    tgt.alive = false;
-    // clear taunts pointing to dead unit
+    tgt.hp=0; tgt.alive=false;
     for(const u of units){
-      if(u.tauntedBy === tgt.id){
-        u.tauntedBy = null;
-        u.tauntT = 0;
-      }
+      if(u.tauntedBy === tgt.id){ u.tauntedBy=null; u.tauntT=0; }
     }
   }
 }
 
-// ----- Abilities -----
+// abilities
 function warriorTaunt(u){
-  // Taunt enemies within 2 hex for 2.5s
   const enemies = living(enemyTeam(u.team));
   for(const e of enemies){
-    const d = hexDist(u.q,u.r,e.q,e.r);
-    if(d <= 2){
+    if(hexDist(u.q,u.r,e.q,e.r) <= 2){
       e.tauntedBy = u.id;
       e.tauntT = Math.max(e.tauntT, 2.5);
     }
   }
 }
-
 function archerJump(u){
-  // If enemy is adjacent (dist<=1), jump one step away
   const enemies = living(enemyTeam(u.team));
-  let adjacent = false;
-  for(const e of enemies){
-    if(hexDist(u.q,u.r,e.q,e.r) <= 1){ adjacent = true; break; }
-  }
+  let adjacent=false;
+  for(const e of enemies){ if(hexDist(u.q,u.r,e.q,e.r) <= 1){ adjacent=true; break; } }
   if(!adjacent) return false;
   const h = stepAway(u);
   if(!h) return false;
-  u.q = h.q; u.r = h.r;
+  u.q=h.q; u.r=h.r;
   return true;
 }
-
 function mageStun(u, target){
-  // Stun target for 1.6s if in range
-  if(!target || !target.alive) return false;
   if(hexDist(u.q,u.r,target.q,target.r) > u.range) return false;
   target.stunnedT = Math.max(target.stunnedT, 1.6);
   return true;
 }
-
 function diverDash(u, target){
-  // Dash closer: move up to 2 steps toward target (if free), only if not already in melee range
-  if(!target || !target.alive) return false;
-  const d0 = hexDist(u.q,u.r,target.q,target.r);
-  if(d0 <= 1) return false;
-
-  let steps = 2;
+  if(hexDist(u.q,u.r,target.q,target.r) <= 1) return false;
+  let steps=2;
   while(steps-- > 0){
     const h = stepToward(u, target);
     if(!h) break;
-    u.q = h.q; u.r = h.r;
+    u.q=h.q; u.r=h.r;
     if(hexDist(u.q,u.r,target.q,target.r) <= 1) break;
   }
   return true;
 }
 
-// ----- AI tick -----
-const TICK = 0.2; // seconds
+// tick
+const TICK = 0.2;
 let acc = 0;
 let lastTs = performance.now();
 
 function aiTick(){
-  // victory check
-  const pAlive = living("P").length;
-  const eAlive = living("E").length;
-  if(pAlive === 0 || eAlive === 0){
-    running = false;
-    return;
-  }
+  if(living("P").length===0 || living("E").length===0){ running=false; return; }
 
   for(const u of units){
     if(!u.alive) continue;
 
-    // decrement timers
     u.tauntT = Math.max(0, u.tauntT - TICK);
     if(u.tauntT === 0){ u.tauntedBy = null; }
     u.stunnedT = Math.max(0, u.stunnedT - TICK);
@@ -360,66 +316,43 @@ function aiTick(){
     u.atkCd = Math.max(0, u.atkCd - TICK);
     u.skillCd = Math.max(0, u.skillCd - TICK);
 
-    if(u.stunnedT > 0) continue; // stunned: cannot move/attack/skill
+    if(u.stunnedT > 0) continue;
 
     const target = nearestEnemy(u);
     if(!target) continue;
 
     const dist = hexDist(u.q,u.r,target.q,target.r);
 
-    // Use skill if ready and condition met
     if(u.skillCd <= 0){
-      let used = false;
-
-      if(u.role === "warrior"){
-        // taunt if enemy within 2 (so it actually hits)
-        if(dist <= 2){
-          warriorTaunt(u);
-          used = true;
-        }
-      } else if(u.role === "archer"){
-        // jump away if threatened (adjacent)
-        used = archerJump(u);
-      } else if(u.role === "mage"){
-        // stun if target in range
-        used = mageStun(u, target);
-      } else if(u.role === "diver"){
-        // dash if not in melee yet
-        used = diverDash(u, target);
-      }
-
-      if(used){
-        u.skillCd = u.skillCdBase;
-      }
+      let used=false;
+      if(u.role==="warrior"){ if(dist<=2){ warriorTaunt(u); used=true; } }
+      else if(u.role==="archer"){ used = archerJump(u); }
+      else if(u.role==="mage"){ used = mageStun(u, target); }
+      else if(u.role==="diver"){ used = diverDash(u, target); }
+      if(used) u.skillCd = u.skillCdBase;
     }
 
-    // Re-evaluate distance (dash/jump might have moved)
-    const target2 = nearestEnemy(u) || target;
-    const dist2 = target2 ? hexDist(u.q,u.r,target2.q,target2.r) : dist;
+    const t2 = nearestEnemy(u) || target;
+    const d2 = t2 ? hexDist(u.q,u.r,t2.q,t2.r) : dist;
 
-    // Attack if in range
-    if(u.atkCd <= 0 && target2 && target2.alive && dist2 <= u.range){
-      applyDamage(u, target2, u.atk);
+    if(u.atkCd<=0 && t2 && t2.alive && d2<=u.range){
+      applyDamage(u, t2, u.atk);
       u.atkCd = u.atkCdBase;
       continue;
     }
-
-    // Otherwise move 1 step toward target
-    if(target2 && dist2 > u.range){
-      const h = stepToward(u, target2);
-      if(h){
-        u.q = h.q; u.r = h.r;
-      }
+    if(t2 && d2>u.range){
+      const h = stepToward(u, t2);
+      if(h){ u.q=h.q; u.r=h.r; }
     }
   }
 }
 
-// ----- Rendering -----
+// render
 function drawUnit(u, isDragging=false, worldX=null, worldY=null){
   const radius = HEX_SIZE * 0.45;
 
   let cx, cy;
-  if(isDragging && worldX !== null && worldY !== null){
+  if(isDragging){
     cx = worldX; cy = worldY;
   } else {
     const pLocal = hexToPixel(u.q, u.r);
@@ -427,25 +360,22 @@ function drawUnit(u, isDragging=false, worldX=null, worldY=null){
     cx = pWorld.x; cy = pWorld.y;
   }
 
-  // body
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI*2);
   ctx.fillStyle = u.color;
   ctx.fill();
 
-  // outline
   ctx.lineWidth = 2 * devicePixelRatio;
   ctx.strokeStyle = "rgba(0,0,0,0.45)";
   ctx.stroke();
 
-  // status ring
   if(u.stunnedT > 0){
     ctx.beginPath();
     ctx.arc(cx, cy, radius*1.08, 0, Math.PI*2);
     ctx.strokeStyle = "rgba(255,255,255,0.65)";
     ctx.lineWidth = 3 * devicePixelRatio;
     ctx.stroke();
-  } else if(u.tauntT > 0 && u.team === "E"){
+  } else if(u.tauntT > 0 && u.team==="E"){
     ctx.beginPath();
     ctx.arc(cx, cy, radius*1.08, 0, Math.PI*2);
     ctx.strokeStyle = "rgba(231,76,60,0.70)";
@@ -467,27 +397,100 @@ function drawUnit(u, isDragging=false, worldX=null, worldY=null){
   ctx.fillRect(x0, y0, barW * t, barH);
 }
 
+let dragging = null;
+let pointerWorld = {x:0,y:0};
+
+function getPointerWorld(e){
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * devicePixelRatio;
+  const y = (e.clientY - rect.top) * devicePixelRatio;
+  return { x, y };
+}
+function unitHitTest(worldX, worldY){
+  const radius = HEX_SIZE * 0.55;
+  for(let i=units.length-1; i>=0; i--){
+    const u = units[i];
+    if(!u.alive || u.team!=="P") continue;
+    const cLocal = hexToPixel(u.q, u.r);
+    const cWorld = localToWorld(cLocal.x, cLocal.y);
+    const dx = worldX - cWorld.x, dy = worldY - cWorld.y;
+    if(dx*dx + dy*dy <= radius*radius) return u;
+  }
+  return null;
+}
+
+canvas.addEventListener("pointerdown", (e)=>{
+  canvas.setPointerCapture(e.pointerId);
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+  const local = worldToLocal(p.x, p.y);
+  hoverHex = pixelToHex(local.x, local.y);
+
+  if(running) return;
+  const u = unitHitTest(p.x, p.y);
+  if(!u) return;
+  dragging = { unit:u, start_q:u.q, start_r:u.r, pointerId:e.pointerId };
+});
+canvas.addEventListener("pointermove", (e)=>{
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+  const local = worldToLocal(p.x, p.y);
+  hoverHex = pixelToHex(local.x, local.y);
+});
+canvas.addEventListener("pointerup", (e)=>{
+  if(!dragging || dragging.pointerId!==e.pointerId) return;
+  if(running){ dragging=null; return; }
+
+  const p = getPointerWorld(e);
+  const local = worldToLocal(p.x, p.y);
+  const h = pixelToHex(local.x, local.y);
+
+  if(h && !unitAt(h.q,h.r)){
+    dragging.unit.q=h.q; dragging.unit.r=h.r;
+  } else {
+    dragging.unit.q=dragging.start_q; dragging.unit.r=dragging.start_r;
+  }
+  dragging=null;
+});
+canvas.addEventListener("pointercancel", (e)=>{
+  if(!dragging || dragging.pointerId!==e.pointerId) return;
+  dragging.unit.q=dragging.start_q; dragging.unit.r=dragging.start_r;
+  dragging=null;
+});
+
+document.getElementById("btnStart").addEventListener("click", ()=>{
+  if(running) return;
+  for(const u of units){
+    u.tauntedBy=null; u.tauntT=0; u.stunnedT=0;
+    u.atkCd=0; u.skillCd=0;
+    u.alive = (u.hp > 0);
+  }
+  running=true;
+  acc=0;
+  lastTs=performance.now();
+});
+document.getElementById("btnReset").addEventListener("click", ()=>{
+  resetGame();
+});
+
 function draw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
   ctx.fillStyle = "#0b0b0c";
   ctx.fillRect(0,0,canvas.width,canvas.height);
 
-  // grid
   const {ox, oy} = computeOrigin();
   ctx.save();
   ctx.translate(ox, oy);
 
   ctx.lineWidth = 2 * devicePixelRatio;
   ctx.strokeStyle = "rgba(255,255,255,0.16)";
-
-  for(let r=0; r<GRID_H; r++){
-    for(let q=0; q<GRID_W; q++){
+  for(let r=0;r<GRID_H;r++){
+    for(let q=0;q<GRID_W;q++){
       const {x,y} = hexToPixel(q, r);
       drawHexOutline(x, y);
     }
   }
 
-  // hover highlight (only when not running)
   if(!running && hoverHex){
     const {x,y} = hexToPixel(hoverHex.q, hoverHex.r);
     ctx.beginPath();
@@ -504,20 +507,17 @@ function draw(){
 
   ctx.restore();
 
-  // units
   for(const u of units){
     if(!u.alive) continue;
-    // dragging handled separately
-    if(dragging && dragging.unit.id === u.id) continue;
+    if(dragging && dragging.unit.id===u.id) continue;
     drawUnit(u);
   }
   if(dragging){
     drawUnit(dragging.unit, true, pointerWorld.x, pointerWorld.y);
   }
 
-  // ticking
   const now = performance.now();
-  const dt = (now - lastTs) / 1000;
+  const dt = (now - lastTs)/1000;
   lastTs = now;
 
   if(running){
@@ -530,105 +530,6 @@ function draw(){
 
   requestAnimationFrame(draw);
 }
-
-// ----- Drag & drop (only before Start) -----
-let dragging = null;
-let pointerWorld = {x:0,y:0};
-
-function getPointerWorld(e){
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * devicePixelRatio;
-  const y = (e.clientY - rect.top) * devicePixelRatio;
-  return { x, y };
-}
-function unitHitTest(worldX, worldY){
-  const radius = HEX_SIZE * 0.55;
-  for(let i=units.length-1; i>=0; i--){
-    const u = units[i];
-    if(!u.alive) continue;
-    // allow dragging only player units
-    if(u.team !== "P") continue;
-
-    const cLocal = hexToPixel(u.q, u.r);
-    const cWorld = localToWorld(cLocal.x, cLocal.y);
-    const dx = worldX - cWorld.x;
-    const dy = worldY - cWorld.y;
-    if(dx*dx + dy*dy <= radius*radius) return u;
-  }
-  return null;
-}
-
-canvas.addEventListener("pointerdown", (e)=>{
-  canvas.setPointerCapture(e.pointerId);
-  const p = getPointerWorld(e);
-  pointerWorld = p;
-
-  const local = worldToLocal(p.x, p.y);
-  hoverHex = pixelToHex(local.x, local.y);
-
-  if(running) return;
-
-  const u = unitHitTest(p.x, p.y);
-  if(!u) return;
-  dragging = { unit: u, start_q: u.q, start_r: u.r, pointerId: e.pointerId };
-});
-canvas.addEventListener("pointermove", (e)=>{
-  const p = getPointerWorld(e);
-  pointerWorld = p;
-  const local = worldToLocal(p.x, p.y);
-  hoverHex = pixelToHex(local.x, local.y);
-});
-canvas.addEventListener("pointerup", (e)=>{
-  if(!dragging || dragging.pointerId !== e.pointerId) return;
-
-  if(running){
-    dragging = null;
-    return;
-  }
-
-  const p = getPointerWorld(e);
-  const local = worldToLocal(p.x, p.y);
-  const h = pixelToHex(local.x, local.y);
-
-  if(h){
-    const occ = unitAt(h.q, h.r);
-    if(!occ){
-      dragging.unit.q = h.q;
-      dragging.unit.r = h.r;
-    } else {
-      dragging.unit.q = dragging.start_q;
-      dragging.unit.r = dragging.start_r;
-    }
-  } else {
-    dragging.unit.q = dragging.start_q;
-    dragging.unit.r = dragging.start_r;
-  }
-  dragging = null;
-});
-canvas.addEventListener("pointercancel", (e)=>{
-  if(!dragging || dragging.pointerId !== e.pointerId) return;
-  dragging.unit.q = dragging.start_q;
-  dragging.unit.r = dragging.start_r;
-  dragging = null;
-});
-
-// ----- Buttons -----
-document.getElementById("btnStart").addEventListener("click", ()=>{
-  if(running) return;
-  // reset timers/cds for a clean start
-  for(const u of units){
-    u.tauntedBy = null; u.tauntT = 0; u.stunnedT = 0;
-    u.atkCd = 0; u.skillCd = 0;
-    u.alive = (u.hp > 0);
-  }
-  running = true;
-  acc = 0;
-  lastTs = performance.now();
-});
-document.getElementById("btnReset").addEventListener("click", ()=>{
-  resetGame();
-});
-
 draw();
 </script>
 </body>
