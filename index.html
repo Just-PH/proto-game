@@ -3,24 +3,42 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Hex Proto (TFT rows)</title>
+  <title>Hex Proto - Combat</title>
   <style>
-    html, body { margin:0; height:100%; background:#0b0b0c; overflow:hidden; }
+    html, body { margin:0; height:100%; background:#0b0b0c; overflow:hidden; font-family: system-ui, -apple-system, Segoe UI, Roboto, Arial; }
     canvas { display:block; width:100vw; height:100vh; touch-action:none; }
+    .ui {
+      position: fixed; left: 12px; top: 12px; z-index: 10;
+      display: flex; gap: 8px; align-items: center;
+      background: rgba(0,0,0,0.35); padding: 10px 12px; border-radius: 10px;
+      color: rgba(255,255,255,0.9);
+      backdrop-filter: blur(6px);
+    }
+    button {
+      border: 0; border-radius: 10px; padding: 8px 10px; cursor: pointer;
+      background: rgba(255,255,255,0.12); color: rgba(255,255,255,0.95);
+    }
+    button:hover { background: rgba(255,255,255,0.18); }
+    .hint { font-size: 12px; opacity: 0.8; }
   </style>
 </head>
 <body>
+<div class="ui">
+  <button id="btnStart">Start</button>
+  <button id="btnReset">Reset</button>
+  <div class="hint">Drag & drop avant Start. Aggro = plus proche.</div>
+</div>
 <canvas id="c"></canvas>
+
 <script>
 /**
- * Hex grid: pointy-top, "odd-r offset" (TFT-style: every other row shifted)
- * Grid size: 10 (wide) x 8 (tall)
- * Units: colored circles draggable with snap-to-hex
+ * Cheap combat prototype (tick-based) on a 10x8 pointy-top odd-r hex grid.
+ * - Drag & drop placement before fight.
+ * - Start button runs AI: move toward nearest enemy until in range.
+ * - 4 player units with simple abilities + gray melee enemies.
  */
 
-const GRID_W = 10;
-const GRID_H = 8;
-
+const GRID_W = 10, GRID_H = 8;
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 
@@ -31,23 +49,20 @@ function resize(){
 window.addEventListener("resize", resize);
 resize();
 
-// --- Hex geometry (pointy-top) ---
-let HEX_SIZE = 28 * devicePixelRatio; // tweak for density / feel
+// ----- Hex geometry (pointy-top, odd-r offset like TFT) -----
+let HEX_SIZE = 28 * devicePixelRatio;
 
 function hexWidth() { return Math.sqrt(3) * HEX_SIZE; }
-function hexHeight() { return 2 * HEX_SIZE; }
-function hexVStep() { return 1.5 * HEX_SIZE; } // vertical spacing between centers
+function hexHeight(){ return 2 * HEX_SIZE; }
+function hexVStep(){ return 1.5 * HEX_SIZE; }
 
-// "odd-r offset": rows alternately shifted by half a hex width
-function hexToPixel(q, r) {
+function hexToPixel(q, r){
   const x = hexWidth() * (q + 0.5 * (r & 1));
   const y = hexVStep() * r;
   return { x, y };
 }
-
-// Draw a single hex outline
 function hexCorner(cx, cy, i){
-  const angle = (Math.PI / 180) * (60 * i - 30); // pointy-top
+  const angle = (Math.PI / 180) * (60 * i - 30);
   return { x: cx + HEX_SIZE * Math.cos(angle), y: cy + HEX_SIZE * Math.sin(angle) };
 }
 function drawHexOutline(cx, cy){
@@ -62,73 +77,344 @@ function drawHexOutline(cx, cy){
   ctx.stroke();
 }
 
-// --- Centering transform ---
 function gridBoundsPx(){
-  // Max x occurs on odd rows due to shift +0.5
   const w = hexWidth();
-  const width = w * (GRID_W + 0.5); // +0.5 shift
+  const width = w * (GRID_W + 0.5);
   const height = hexVStep() * (GRID_H - 1) + hexHeight();
   return { width, height };
 }
-
 function computeOrigin(){
   const b = gridBoundsPx();
-  const ox = (canvas.width - b.width) / 2 + HEX_SIZE; // a bit of padding
-  const oy = (canvas.height - b.height) / 2 + HEX_SIZE;
+  const ox = (canvas.width - b.width)/2 + HEX_SIZE;
+  const oy = (canvas.height - b.height)/2 + HEX_SIZE;
   return { ox, oy };
 }
-
 function worldToLocal(px, py){
-  const { ox, oy } = computeOrigin();
+  const {ox, oy} = computeOrigin();
   return { x: px - ox, y: py - oy };
 }
 function localToWorld(x, y){
-  const { ox, oy } = computeOrigin();
+  const {ox, oy} = computeOrigin();
   return { x: x + ox, y: y + oy };
 }
 
-// --- Pixel -> hex (odd-r offset) ---
-// 1) Approximate r from y
-// 2) Approximate q from x considering row shift
-// 3) Then pick closest hex among nearby candidates (cheap & robust)
+// pixel -> hex: pick closest center among nearby candidates
 function pixelToHex(localX, localY){
   const rApprox = localY / hexVStep();
   const r0 = Math.round(rApprox);
 
-  // consider nearby rows because rounding can be off near borders
-  const candidates = [];
+  let best = null;
   for(let dr=-1; dr<=1; dr++){
     const r = r0 + dr;
     if(r < 0 || r >= GRID_H) continue;
     const qApprox = (localX / hexWidth()) - 0.5 * (r & 1);
     const q0 = Math.round(qApprox);
+
     for(let dq=-1; dq<=1; dq++){
       const q = q0 + dq;
       if(q < 0 || q >= GRID_W) continue;
-      const {x, y} = hexToPixel(q, r);
-      const dx = localX - x;
-      const dy = localY - y;
-      candidates.push({ q, r, d2: dx*dx + dy*dy });
+      const {x,y} = hexToPixel(q, r);
+      const dx = localX - x, dy = localY - y;
+      const d2 = dx*dx + dy*dy;
+      if(!best || d2 < best.d2) best = { q, r, d2 };
     }
   }
-  if(candidates.length === 0) return null;
-  candidates.sort((a,b)=>a.d2-b.d2);
-  return { q: candidates[0].q, r: candidates[0].r };
+  return best ? { q: best.q, r: best.r } : null;
 }
 
-// --- Units ---
-const COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#f1c40f"]; // red/green/blue/yellow
-const units = [
-  { id: 1, q: 1, r: 2, color: COLORS[0] },
-  { id: 2, q: 2, r: 3, color: COLORS[1] },
-  { id: 3, q: 1, r: 4, color: COLORS[2] },
-  { id: 4, q: 2, r: 5, color: COLORS[3] },
+// ----- Hex axial distance (using offset->axial conversion) -----
+// We'll keep board coords as odd-r offset (q,r) but compute distance via axial coords.
+function offsetToAxial(q, r){
+  // odd-r to axial
+  const aq = q - ((r - (r & 1)) / 2);
+  const ar = r;
+  return { aq, ar };
+}
+function hexDist(q1,r1,q2,r2){
+  const a = offsetToAxial(q1,r1);
+  const b = offsetToAxial(q2,r2);
+  const dq = b.aq - a.aq;
+  const dr = b.ar - a.ar;
+  return (Math.abs(dq) + Math.abs(dr) + Math.abs(dq+dr)) / 2;
+}
+const DIRS_AXIAL = [
+  {dq:+1, dr:0}, {dq:-1, dr:0}, {dq:0, dr:+1}, {dq:0, dr:-1}, {dq:+1, dr:-1}, {dq:-1, dr:+1}
 ];
+function axialToOffset(aq, ar){
+  const r = ar;
+  const q = aq + ((r - (r & 1)) / 2);
+  return { q, r };
+}
+function neighbors(q, r){
+  const a = offsetToAxial(q,r);
+  const out = [];
+  for(const d of DIRS_AXIAL){
+    const na = { aq: a.aq + d.dq, ar: a.ar + d.dr };
+    const no = axialToOffset(na.aq, na.ar);
+    if(no.q>=0 && no.q<GRID_W && no.r>=0 && no.r<GRID_H) out.push(no);
+  }
+  return out;
+}
+
+// ----- Units / combat -----
+const COLORS = {
+  red:   "#e74c3c",
+  green: "#2ecc71",
+  blue:  "#3498db",
+  yellow:"#f1c40f",
+  gray:  "#b0b3b8"
+};
+
+function makeUnit({id, team, q, r, color, role}){
+  const base = {
+    id, team, q, r, color, role,
+    hp: 100, maxHp: 100,
+    alive: true,
+    // status timers (seconds)
+    tauntedBy: null,   // unit id
+    tauntT: 0,
+    stunnedT: 0,
+    // cooldowns (seconds)
+    atkCd: 0,
+    skillCd: 0,
+  };
+
+  // Role tuning
+  if(role === "warrior"){ base.maxHp=160; base.hp=160; base.atk=18; base.range=1; base.atkCdBase=0.9; base.skillCdBase=6.0; }
+  if(role === "archer") { base.maxHp=95;  base.hp=95;  base.atk=16; base.range=3; base.atkCdBase=1.0; base.skillCdBase=5.0; }
+  if(role === "mage")   { base.maxHp=90;  base.hp=90;  base.atk=14; base.range=3; base.atkCdBase=1.1; base.skillCdBase=6.0; }
+  if(role === "diver")  { base.maxHp=120; base.hp=120; base.atk=17; base.range=1; base.atkCdBase=1.0; base.skillCdBase=5.5; }
+  if(role === "grunt")  { base.maxHp=100; base.hp=100; base.atk=12; base.range=1; base.atkCdBase=1.1; base.skillCdBase=999; }
+
+  return base;
+}
+
+let units = [];
+let running = false;
+let hoverHex = null;
+
+function resetGame(){
+  running = false;
+  units = [
+    makeUnit({id:1, team:"P", q:1, r:2, color:COLORS.red, role:"warrior"}),
+    makeUnit({id:2, team:"P", q:2, r:3, color:COLORS.green, role:"archer"}),
+    makeUnit({id:3, team:"P", q:1, r:4, color:COLORS.blue, role:"mage"}),
+    makeUnit({id:4, team:"P", q:2, r:5, color:COLORS.yellow, role:"diver"}),
+
+    // gray enemies (basic melee)
+    makeUnit({id:101, team:"E", q:8, r:2, color:COLORS.gray, role:"grunt"}),
+    makeUnit({id:102, team:"E", q:8, r:3, color:COLORS.gray, role:"grunt"}),
+    makeUnit({id:103, team:"E", q:8, r:4, color:COLORS.gray, role:"grunt"}),
+    makeUnit({id:104, team:"E", q:8, r:5, color:COLORS.gray, role:"grunt"}),
+    makeUnit({id:105, team:"E", q:7, r:3, color:COLORS.gray, role:"grunt"}),
+  ];
+}
+resetGame();
 
 function unitAt(q, r){
-  return units.find(u => u.q === q && u.r === r) || null;
+  return units.find(u => u.alive && u.q===q && u.r===r) || null;
+}
+function living(team){
+  return units.filter(u => u.alive && u.team===team);
+}
+function enemyTeam(team){ return team === "P" ? "E" : "P"; }
+
+function nearestEnemy(u){
+  const enemies = living(enemyTeam(u.team));
+  if(enemies.length===0) return null;
+
+  // If taunted, force target to taunter if still alive
+  if(u.tauntT > 0 && u.tauntedBy !== null){
+    const taunter = units.find(x => x.id===u.tauntedBy && x.alive);
+    if(taunter) return taunter;
+  }
+
+  let best = null;
+  for(const e of enemies){
+    const d = hexDist(u.q,u.r,e.q,e.r);
+    if(!best || d < best.d) best = { e, d };
+  }
+  return best ? best.e : null;
 }
 
+// Pick next step greedily (no obstacles), avoid occupied tiles
+function stepToward(u, target){
+  const nbs = neighbors(u.q,u.r).filter(h => !unitAt(h.q,h.r));
+  if(nbs.length===0) return null;
+
+  let best = null;
+  for(const h of nbs){
+    const d = hexDist(h.q,h.r,target.q,target.r);
+    if(!best || d < best.d) best = { h, d };
+  }
+  return best ? best.h : null;
+}
+
+// Step away (for archer escape): choose neighbor that maximizes distance to closest enemy, avoid occupied
+function stepAway(u){
+  const enemies = living(enemyTeam(u.team));
+  const nbs = neighbors(u.q,u.r).filter(h => !unitAt(h.q,h.r));
+  if(nbs.length===0) return null;
+
+  let best = null;
+  for(const h of nbs){
+    let minD = Infinity;
+    for(const e of enemies){
+      const d = hexDist(h.q,h.r,e.q,e.r);
+      if(d < minD) minD = d;
+    }
+    if(!best || minD > best.minD) best = { h, minD };
+  }
+  return best ? best.h : null;
+}
+
+function applyDamage(src, tgt, amount){
+  if(!tgt.alive) return;
+  tgt.hp -= amount;
+  if(tgt.hp <= 0){
+    tgt.hp = 0;
+    tgt.alive = false;
+    // clear taunts pointing to dead unit
+    for(const u of units){
+      if(u.tauntedBy === tgt.id){
+        u.tauntedBy = null;
+        u.tauntT = 0;
+      }
+    }
+  }
+}
+
+// ----- Abilities -----
+function warriorTaunt(u){
+  // Taunt enemies within 2 hex for 2.5s
+  const enemies = living(enemyTeam(u.team));
+  for(const e of enemies){
+    const d = hexDist(u.q,u.r,e.q,e.r);
+    if(d <= 2){
+      e.tauntedBy = u.id;
+      e.tauntT = Math.max(e.tauntT, 2.5);
+    }
+  }
+}
+
+function archerJump(u){
+  // If enemy is adjacent (dist<=1), jump one step away
+  const enemies = living(enemyTeam(u.team));
+  let adjacent = false;
+  for(const e of enemies){
+    if(hexDist(u.q,u.r,e.q,e.r) <= 1){ adjacent = true; break; }
+  }
+  if(!adjacent) return false;
+  const h = stepAway(u);
+  if(!h) return false;
+  u.q = h.q; u.r = h.r;
+  return true;
+}
+
+function mageStun(u, target){
+  // Stun target for 1.6s if in range
+  if(!target || !target.alive) return false;
+  if(hexDist(u.q,u.r,target.q,target.r) > u.range) return false;
+  target.stunnedT = Math.max(target.stunnedT, 1.6);
+  return true;
+}
+
+function diverDash(u, target){
+  // Dash closer: move up to 2 steps toward target (if free), only if not already in melee range
+  if(!target || !target.alive) return false;
+  const d0 = hexDist(u.q,u.r,target.q,target.r);
+  if(d0 <= 1) return false;
+
+  let steps = 2;
+  while(steps-- > 0){
+    const h = stepToward(u, target);
+    if(!h) break;
+    u.q = h.q; u.r = h.r;
+    if(hexDist(u.q,u.r,target.q,target.r) <= 1) break;
+  }
+  return true;
+}
+
+// ----- AI tick -----
+const TICK = 0.2; // seconds
+let acc = 0;
+let lastTs = performance.now();
+
+function aiTick(){
+  // victory check
+  const pAlive = living("P").length;
+  const eAlive = living("E").length;
+  if(pAlive === 0 || eAlive === 0){
+    running = false;
+    return;
+  }
+
+  for(const u of units){
+    if(!u.alive) continue;
+
+    // decrement timers
+    u.tauntT = Math.max(0, u.tauntT - TICK);
+    if(u.tauntT === 0){ u.tauntedBy = null; }
+    u.stunnedT = Math.max(0, u.stunnedT - TICK);
+
+    u.atkCd = Math.max(0, u.atkCd - TICK);
+    u.skillCd = Math.max(0, u.skillCd - TICK);
+
+    if(u.stunnedT > 0) continue; // stunned: cannot move/attack/skill
+
+    const target = nearestEnemy(u);
+    if(!target) continue;
+
+    const dist = hexDist(u.q,u.r,target.q,target.r);
+
+    // Use skill if ready and condition met
+    if(u.skillCd <= 0){
+      let used = false;
+
+      if(u.role === "warrior"){
+        // taunt if enemy within 2 (so it actually hits)
+        if(dist <= 2){
+          warriorTaunt(u);
+          used = true;
+        }
+      } else if(u.role === "archer"){
+        // jump away if threatened (adjacent)
+        used = archerJump(u);
+      } else if(u.role === "mage"){
+        // stun if target in range
+        used = mageStun(u, target);
+      } else if(u.role === "diver"){
+        // dash if not in melee yet
+        used = diverDash(u, target);
+      }
+
+      if(used){
+        u.skillCd = u.skillCdBase;
+      }
+    }
+
+    // Re-evaluate distance (dash/jump might have moved)
+    const target2 = nearestEnemy(u) || target;
+    const dist2 = target2 ? hexDist(u.q,u.r,target2.q,target2.r) : dist;
+
+    // Attack if in range
+    if(u.atkCd <= 0 && target2 && target2.alive && dist2 <= u.range){
+      applyDamage(u, target2, u.atk);
+      u.atkCd = u.atkCdBase;
+      continue;
+    }
+
+    // Otherwise move 1 step toward target
+    if(target2 && dist2 > u.range){
+      const h = stepToward(u, target2);
+      if(h){
+        u.q = h.q; u.r = h.r;
+      }
+    }
+  }
+}
+
+// ----- Rendering -----
 function drawUnit(u, isDragging=false, worldX=null, worldY=null){
   const radius = HEX_SIZE * 0.45;
 
@@ -136,164 +422,27 @@ function drawUnit(u, isDragging=false, worldX=null, worldY=null){
   if(isDragging && worldX !== null && worldY !== null){
     cx = worldX; cy = worldY;
   } else {
-    const {x, y} = localToWorld(...Object.values(hexToPixel(u.q, u.r)));
-    cx = x; cy = y;
+    const pLocal = hexToPixel(u.q, u.r);
+    const pWorld = localToWorld(pLocal.x, pLocal.y);
+    cx = pWorld.x; cy = pWorld.y;
   }
 
-  // filled circle
+  // body
   ctx.beginPath();
   ctx.arc(cx, cy, radius, 0, Math.PI*2);
   ctx.fillStyle = u.color;
   ctx.fill();
 
-  // subtle border for readability
+  // outline
   ctx.lineWidth = 2 * devicePixelRatio;
-  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.strokeStyle = "rgba(0,0,0,0.45)";
   ctx.stroke();
 
-  // tiny highlight dot (gives "2.5D" feel)
-  ctx.beginPath();
-  ctx.arc(cx - radius*0.25, cy - radius*0.25, radius*0.12, 0, Math.PI*2);
-  ctx.fillStyle = "rgba(255,255,255,0.35)";
-  ctx.fill();
-}
-
-function unitHitTest(worldX, worldY){
-  // check closest unit within radius
-  const radius = HEX_SIZE * 0.5;
-  for(let i=units.length-1; i>=0; i--){
-    const u = units[i];
-    const cLocal = hexToPixel(u.q, u.r);
-    const cWorld = localToWorld(cLocal.x, cLocal.y);
-    const dx = worldX - cWorld.x;
-    const dy = worldY - cWorld.y;
-    if(dx*dx + dy*dy <= radius*radius) return u;
-  }
-  return null;
-}
-
-// --- Drag state ---
-let dragging = null; // { unit, start_q, start_r, pointerId }
-let pointerWorld = { x: 0, y: 0 };
-let hoverHex = null;
-
-// Pointer helpers
-function getPointerWorld(e){
-  const rect = canvas.getBoundingClientRect();
-  const x = (e.clientX - rect.left) * devicePixelRatio;
-  const y = (e.clientY - rect.top) * devicePixelRatio;
-  return { x, y };
-}
-
-canvas.addEventListener("pointerdown", (e) => {
-  canvas.setPointerCapture(e.pointerId);
-  const p = getPointerWorld(e);
-  pointerWorld = p;
-  const u = unitHitTest(p.x, p.y);
-  if(!u) return;
-
-  dragging = { unit: u, start_q: u.q, start_r: u.r, pointerId: e.pointerId };
-});
-
-canvas.addEventListener("pointermove", (e) => {
-  const p = getPointerWorld(e);
-  pointerWorld = p;
-
-  const local = worldToLocal(p.x, p.y);
-  hoverHex = pixelToHex(local.x, local.y);
-
-  if(dragging && dragging.pointerId === e.pointerId){
-    // just keep dragging; snap on pointerup
-  }
-});
-
-canvas.addEventListener("pointerup", (e) => {
-  if(!dragging || dragging.pointerId !== e.pointerId) return;
-
-  const p = getPointerWorld(e);
-  const local = worldToLocal(p.x, p.y);
-  const h = pixelToHex(local.x, local.y);
-
-  if(h){
-    const occupied = unitAt(h.q, h.r);
-    if(!occupied || occupied.id === dragging.unit.id){
-      dragging.unit.q = h.q;
-      dragging.unit.r = h.r;
-    } else {
-      // occupied: revert
-      dragging.unit.q = dragging.start_q;
-      dragging.unit.r = dragging.start_r;
-    }
-  } else {
-    // out of bounds: revert
-    dragging.unit.q = dragging.start_q;
-    dragging.unit.r = dragging.start_r;
-  }
-
-  dragging = null;
-});
-
-canvas.addEventListener("pointercancel", (e) => {
-  if(!dragging || dragging.pointerId !== e.pointerId) return;
-  dragging.unit.q = dragging.start_q;
-  dragging.unit.r = dragging.start_r;
-  dragging = null;
-});
-
-// --- Render loop ---
-function draw(){
-  ctx.clearRect(0,0,canvas.width,canvas.height);
-
-  // Background
-  ctx.fillStyle = "#0b0b0c";
-  ctx.fillRect(0,0,canvas.width,canvas.height);
-
-  // Grid
-  const { ox, oy } = computeOrigin();
-  ctx.save();
-  ctx.translate(ox, oy);
-
-  ctx.lineWidth = 2 * devicePixelRatio;
-  ctx.strokeStyle = "rgba(255,255,255,0.16)";
-
-  for(let r=0; r<GRID_H; r++){
-    for(let q=0; q<GRID_W; q++){
-      const {x,y} = hexToPixel(q, r);
-      drawHexOutline(x, y);
-    }
-  }
-
-  // Hover highlight (only when pointer over grid)
-  if(hoverHex){
-    const {x,y} = hexToPixel(hoverHex.q, hoverHex.r);
+  // status ring
+  if(u.stunnedT > 0){
     ctx.beginPath();
-    const p0 = hexCorner(x, y, 0);
-    ctx.moveTo(p0.x, p0.y);
-    for(let i=1;i<6;i++){
-      const p = hexCorner(x, y, i);
-      ctx.lineTo(p.x, p.y);
-    }
-    ctx.closePath();
-    ctx.fillStyle = "rgba(255,255,255,0.06)";
-    ctx.fill();
-  }
-
-  ctx.restore();
-
-  // Units (draw non-dragging first)
-  for(const u of units){
-    if(dragging && dragging.unit.id === u.id) continue;
-    drawUnit(u);
-  }
-
-  // Dragging unit on top
-  if(dragging){
-    drawUnit(dragging.unit, true, pointerWorld.x, pointerWorld.y);
-  }
-
-  requestAnimationFrame(draw);
-}
-draw();
-</script>
-</body>
-</html>
+    ctx.arc(cx, cy, radius*1.08, 0, Math.PI*2);
+    ctx.strokeStyle = "rgba(255,255,255,0.65)";
+    ctx.lineWidth = 3 * devicePixelRatio;
+    ctx.stroke();
+  } else
