@@ -3,7 +3,7 @@
 <head>
   <meta charset="utf-8" />
   <meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no" />
-  <title>Hex Proto</title>
+  <title>Hex Proto (TFT rows)</title>
   <style>
     html, body { margin:0; height:100%; background:#0b0b0c; overflow:hidden; }
     canvas { display:block; width:100vw; height:100vh; touch-action:none; }
@@ -12,7 +12,15 @@
 <body>
 <canvas id="c"></canvas>
 <script>
-const W = 10, H = 8;               // 10 x 8 hexes
+/**
+ * Hex grid: pointy-top, "odd-r offset" (TFT-style: every other row shifted)
+ * Grid size: 10 (wide) x 8 (tall)
+ * Units: colored circles draggable with snap-to-hex
+ */
+
+const GRID_W = 10;
+const GRID_H = 8;
+
 const canvas = document.getElementById("c");
 const ctx = canvas.getContext("2d");
 
@@ -23,23 +31,26 @@ function resize(){
 window.addEventListener("resize", resize);
 resize();
 
-// Pointy-top axial -> pixel (Red Blob Games convention)
-const hexSize = 28 * devicePixelRatio; // tweak
-// Pointy-top "odd-r offset": rows are alternately shifted half a hex
+// --- Hex geometry (pointy-top) ---
+let HEX_SIZE = 28 * devicePixelRatio; // tweak for density / feel
 
-function axialToPixel(q, r){
-  const w = Math.sqrt(3) * hexSize;   // hex width (pointy-top)
-  const h = 2 * hexSize;             // hex height
-  const x = w * (q + 0.5 * (r & 1));  // shift odd rows to the right by half-hex
-  const y = (3/2) * hexSize * r;      // vertical spacing
+function hexWidth() { return Math.sqrt(3) * HEX_SIZE; }
+function hexHeight() { return 2 * HEX_SIZE; }
+function hexVStep() { return 1.5 * HEX_SIZE; } // vertical spacing between centers
+
+// "odd-r offset": rows alternately shifted by half a hex width
+function hexToPixel(q, r) {
+  const x = hexWidth() * (q + 0.5 * (r & 1));
+  const y = hexVStep() * r;
   return { x, y };
 }
 
+// Draw a single hex outline
 function hexCorner(cx, cy, i){
-  const angle = (Math.PI / 180) * (60 * i - 30);
-  return { x: cx + hexSize * Math.cos(angle), y: cy + hexSize * Math.sin(angle) };
+  const angle = (Math.PI / 180) * (60 * i - 30); // pointy-top
+  return { x: cx + HEX_SIZE * Math.cos(angle), y: cy + HEX_SIZE * Math.sin(angle) };
 }
-function drawHex(cx, cy){
+function drawHexOutline(cx, cy){
   ctx.beginPath();
   const p0 = hexCorner(cx, cy, 0);
   ctx.moveTo(p0.x, p0.y);
@@ -51,30 +62,235 @@ function drawHex(cx, cy){
   ctx.stroke();
 }
 
+// --- Centering transform ---
+function gridBoundsPx(){
+  // Max x occurs on odd rows due to shift +0.5
+  const w = hexWidth();
+  const width = w * (GRID_W + 0.5); // +0.5 shift
+  const height = hexVStep() * (GRID_H - 1) + hexHeight();
+  return { width, height };
+}
+
+function computeOrigin(){
+  const b = gridBoundsPx();
+  const ox = (canvas.width - b.width) / 2 + HEX_SIZE; // a bit of padding
+  const oy = (canvas.height - b.height) / 2 + HEX_SIZE;
+  return { ox, oy };
+}
+
+function worldToLocal(px, py){
+  const { ox, oy } = computeOrigin();
+  return { x: px - ox, y: py - oy };
+}
+function localToWorld(x, y){
+  const { ox, oy } = computeOrigin();
+  return { x: x + ox, y: y + oy };
+}
+
+// --- Pixel -> hex (odd-r offset) ---
+// 1) Approximate r from y
+// 2) Approximate q from x considering row shift
+// 3) Then pick closest hex among nearby candidates (cheap & robust)
+function pixelToHex(localX, localY){
+  const rApprox = localY / hexVStep();
+  const r0 = Math.round(rApprox);
+
+  // consider nearby rows because rounding can be off near borders
+  const candidates = [];
+  for(let dr=-1; dr<=1; dr++){
+    const r = r0 + dr;
+    if(r < 0 || r >= GRID_H) continue;
+    const qApprox = (localX / hexWidth()) - 0.5 * (r & 1);
+    const q0 = Math.round(qApprox);
+    for(let dq=-1; dq<=1; dq++){
+      const q = q0 + dq;
+      if(q < 0 || q >= GRID_W) continue;
+      const {x, y} = hexToPixel(q, r);
+      const dx = localX - x;
+      const dy = localY - y;
+      candidates.push({ q, r, d2: dx*dx + dy*dy });
+    }
+  }
+  if(candidates.length === 0) return null;
+  candidates.sort((a,b)=>a.d2-b.d2);
+  return { q: candidates[0].q, r: candidates[0].r };
+}
+
+// --- Units ---
+const COLORS = ["#e74c3c", "#2ecc71", "#3498db", "#f1c40f"]; // red/green/blue/yellow
+const units = [
+  { id: 1, q: 1, r: 2, color: COLORS[0] },
+  { id: 2, q: 2, r: 3, color: COLORS[1] },
+  { id: 3, q: 1, r: 4, color: COLORS[2] },
+  { id: 4, q: 2, r: 5, color: COLORS[3] },
+];
+
+function unitAt(q, r){
+  return units.find(u => u.q === q && u.r === r) || null;
+}
+
+function drawUnit(u, isDragging=false, worldX=null, worldY=null){
+  const radius = HEX_SIZE * 0.45;
+
+  let cx, cy;
+  if(isDragging && worldX !== null && worldY !== null){
+    cx = worldX; cy = worldY;
+  } else {
+    const {x, y} = localToWorld(...Object.values(hexToPixel(u.q, u.r)));
+    cx = x; cy = y;
+  }
+
+  // filled circle
+  ctx.beginPath();
+  ctx.arc(cx, cy, radius, 0, Math.PI*2);
+  ctx.fillStyle = u.color;
+  ctx.fill();
+
+  // subtle border for readability
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.strokeStyle = "rgba(255,255,255,0.25)";
+  ctx.stroke();
+
+  // tiny highlight dot (gives "2.5D" feel)
+  ctx.beginPath();
+  ctx.arc(cx - radius*0.25, cy - radius*0.25, radius*0.12, 0, Math.PI*2);
+  ctx.fillStyle = "rgba(255,255,255,0.35)";
+  ctx.fill();
+}
+
+function unitHitTest(worldX, worldY){
+  // check closest unit within radius
+  const radius = HEX_SIZE * 0.5;
+  for(let i=units.length-1; i>=0; i--){
+    const u = units[i];
+    const cLocal = hexToPixel(u.q, u.r);
+    const cWorld = localToWorld(cLocal.x, cLocal.y);
+    const dx = worldX - cWorld.x;
+    const dy = worldY - cWorld.y;
+    if(dx*dx + dy*dy <= radius*radius) return u;
+  }
+  return null;
+}
+
+// --- Drag state ---
+let dragging = null; // { unit, start_q, start_r, pointerId }
+let pointerWorld = { x: 0, y: 0 };
+let hoverHex = null;
+
+// Pointer helpers
+function getPointerWorld(e){
+  const rect = canvas.getBoundingClientRect();
+  const x = (e.clientX - rect.left) * devicePixelRatio;
+  const y = (e.clientY - rect.top) * devicePixelRatio;
+  return { x, y };
+}
+
+canvas.addEventListener("pointerdown", (e) => {
+  canvas.setPointerCapture(e.pointerId);
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+  const u = unitHitTest(p.x, p.y);
+  if(!u) return;
+
+  dragging = { unit: u, start_q: u.q, start_r: u.r, pointerId: e.pointerId };
+});
+
+canvas.addEventListener("pointermove", (e) => {
+  const p = getPointerWorld(e);
+  pointerWorld = p;
+
+  const local = worldToLocal(p.x, p.y);
+  hoverHex = pixelToHex(local.x, local.y);
+
+  if(dragging && dragging.pointerId === e.pointerId){
+    // just keep dragging; snap on pointerup
+  }
+});
+
+canvas.addEventListener("pointerup", (e) => {
+  if(!dragging || dragging.pointerId !== e.pointerId) return;
+
+  const p = getPointerWorld(e);
+  const local = worldToLocal(p.x, p.y);
+  const h = pixelToHex(local.x, local.y);
+
+  if(h){
+    const occupied = unitAt(h.q, h.r);
+    if(!occupied || occupied.id === dragging.unit.id){
+      dragging.unit.q = h.q;
+      dragging.unit.r = h.r;
+    } else {
+      // occupied: revert
+      dragging.unit.q = dragging.start_q;
+      dragging.unit.r = dragging.start_r;
+    }
+  } else {
+    // out of bounds: revert
+    dragging.unit.q = dragging.start_q;
+    dragging.unit.r = dragging.start_r;
+  }
+
+  dragging = null;
+});
+
+canvas.addEventListener("pointercancel", (e) => {
+  if(!dragging || dragging.pointerId !== e.pointerId) return;
+  dragging.unit.q = dragging.start_q;
+  dragging.unit.r = dragging.start_r;
+  dragging = null;
+});
+
+// --- Render loop ---
 function draw(){
   ctx.clearRect(0,0,canvas.width,canvas.height);
+
+  // Background
+  ctx.fillStyle = "#0b0b0c";
+  ctx.fillRect(0,0,canvas.width,canvas.height);
+
+  // Grid
+  const { ox, oy } = computeOrigin();
   ctx.save();
+  ctx.translate(ox, oy);
 
-  // Center grid on screen
-  // Approx grid bbox for centering (cheap)
-  // Compute grid bounding box for centering (accounts for stagger)
-    const w = Math.sqrt(3) * hexSize;
-    const gridW = w * (W + 0.5);                 // +0.5 because odd rows shift
-    const gridH = (3/2) * hexSize * (H - 1) + 2*hexSize;
+  ctx.lineWidth = 2 * devicePixelRatio;
+  ctx.strokeStyle = "rgba(255,255,255,0.16)";
 
-    ctx.translate(
-    (canvas.width - gridW)/2 + hexSize,
-    (canvas.height - gridH)/2 + hexSize
-    );
-
-  for(let r=0;r<H;r++){
-    for(let q=0;q<W;q++){
-      const {x,y} = axialToPixel(q, r);
-      drawHex(x, y);
+  for(let r=0; r<GRID_H; r++){
+    for(let q=0; q<GRID_W; q++){
+      const {x,y} = hexToPixel(q, r);
+      drawHexOutline(x, y);
     }
   }
 
+  // Hover highlight (only when pointer over grid)
+  if(hoverHex){
+    const {x,y} = hexToPixel(hoverHex.q, hoverHex.r);
+    ctx.beginPath();
+    const p0 = hexCorner(x, y, 0);
+    ctx.moveTo(p0.x, p0.y);
+    for(let i=1;i<6;i++){
+      const p = hexCorner(x, y, i);
+      ctx.lineTo(p.x, p.y);
+    }
+    ctx.closePath();
+    ctx.fillStyle = "rgba(255,255,255,0.06)";
+    ctx.fill();
+  }
+
   ctx.restore();
+
+  // Units (draw non-dragging first)
+  for(const u of units){
+    if(dragging && dragging.unit.id === u.id) continue;
+    drawUnit(u);
+  }
+
+  // Dragging unit on top
+  if(dragging){
+    drawUnit(dragging.unit, true, pointerWorld.x, pointerWorld.y);
+  }
+
   requestAnimationFrame(draw);
 }
 draw();
